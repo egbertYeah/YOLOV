@@ -35,11 +35,11 @@ class YOLOXHead(nn.Module):
             heads=4,
             drop=0.0,
             use_score=True,
-            defualt_p=30,
+            defualt_p=30,           # after num boxes num
             sim_thresh=0.75,
             pre_nms=0.75,
             ave=True,
-            defulat_pre=750,
+            defulat_pre=750,        # before nms boxes num
             test_conf=0.001,
             use_mask=False
     ):
@@ -67,13 +67,17 @@ class YOLOXHead(nn.Module):
         self.cls_convs2 = nn.ModuleList()
 
         self.width = int(256 * width)
+        # FAM
         self.trans = MSA_yolov(dim=self.width, out_dim=4 * self.width, num_heads=heads, attn_drop=drop)
+
         self.stems = nn.ModuleList()
+
         self.linear_pred = nn.Linear(int(4 * self.width),
                                      num_classes + 1)  # Mlp(in_features=512,hidden_features=self.num_classes+1)
         self.sim_thresh = sim_thresh
         self.ave = ave
         self.use_mask = use_mask
+
         Conv = DWConv if depthwise else BaseConv
 
         for i in range(len(in_channels)):
@@ -106,6 +110,7 @@ class YOLOXHead(nn.Module):
                     ]
                 )
             )
+            # video object classification branch
             self.cls_convs2.append(
                 nn.Sequential(
                     *[
@@ -215,6 +220,7 @@ class YOLOXHead(nn.Module):
             obj_output = self.obj_preds[k](reg_feat)
             reg_output = self.reg_preds[k](reg_feat)
             cls_output = self.cls_preds[k](cls_feat)
+
             if self.training:
                 output = torch.cat([reg_output, obj_output, cls_output], 1)
                 output_decode = torch.cat(
@@ -244,50 +250,63 @@ class YOLOXHead(nn.Module):
                 before_nms_features.append(cls_feat2)
                 before_nms_regf.append(reg_feat)
             else:
+                # image object detector outputs
+                # prediction
                 output_decode = torch.cat(
                     [reg_output, obj_output.sigmoid(), cls_output.sigmoid()], 1
                 )
 
                 # which features to choose
-                before_nms_features.append(cls_feat2)
-                before_nms_regf.append(reg_feat)
+                # features 
+                before_nms_features.append(cls_feat2)   # video object 
+                before_nms_regf.append(reg_feat)        # bbox 
+            # image outputs
             outputs_decode.append(output_decode)
-
-        self.hw = [x.shape[-2:] for x in outputs_decode]
-
+        # output feature map size
+        self.hw = [x.shape[-2:] for x in outputs_decode]        # [20, 20] [40, 40] [80, 80]
+        
         outputs_decode = torch.cat([x.flatten(start_dim=2) for x in outputs_decode], dim=2
-                                   ).permute(0, 2, 1)
+                                   ).permute(0, 2, 1)       # [batch, 8400, 35]
+        # decode boxes
         decode_res = self.decode_outputs(outputs_decode, dtype=xin[0].type())
-
-        pred_result, pred_idx = self.postpro_woclass(decode_res, num_classes=self.num_classes, nms_thre=self.nms_thresh,
-                                                     topK=self.Afternum)   # postprocess(decode_res,num_classes=30)
+        # input: [batch, 8400, 35]
+        pred_result, pred_idx = self.postpro_woclass(decode_res, num_classes=self.num_classes,
+                                                    nms_thre=self.nms_thresh,
+                                                    topK=self.Afternum)   # postprocess(decode_res,num_classes=30)
+        logger.info(pred_result.shape)      # [batch, topK, 37]
         #return pred_result
-        if not self.training and imgs.shape[0] == 1:
-            return self.postprocess_single_img(pred_result, self.num_classes)
+        # if not self.training and imgs.shape[0] == 1:        # image pred return
+        #     return self.postprocess_single_img(pred_result, self.num_classes)
 
+        # feature set from FSM
         cls_feat_flatten = torch.cat(
             [x.flatten(start_dim=2) for x in before_nms_features], dim=2
-        ).permute(0, 2, 1)  # [b,features,channels]
+        ).permute(0, 2, 1)  # [b,8400,256]
+
         reg_feat_flatten = torch.cat(
             [x.flatten(start_dim=2) for x in before_nms_regf], dim=2
-        ).permute(0, 2, 1)
-
+        ).permute(0, 2, 1)  # [b,8400,256]
+        # fg_scores: obj conf
         features_cls, features_reg, cls_scores, fg_scores = self.find_feature_score(cls_feat_flatten, pred_idx,
                                                                                     reg_feat_flatten, imgs,
-                                                                                    pred_result)
+                                                                                    pred_result)        # pred_result: prediction confidences
         features_reg = features_reg.unsqueeze(0)
         features_cls = features_cls.unsqueeze(0)
         if not self.training:
             cls_scores = cls_scores.to(cls_feat_flatten.dtype)
             fg_scores = fg_scores.to(cls_feat_flatten.dtype)
-        if self.use_score:
+        #************************ 好难理解 ********************** #
+        # FAM: Feature Aggregation Module
+        if self.use_score:      # True
             trans_cls = self.trans(features_cls, features_reg, cls_scores, fg_scores, sim_thresh=self.sim_thresh,
                                    ave=self.ave, use_mask=self.use_mask)
         else:
             trans_cls = self.trans(features_cls, features_reg, None, None, sim_thresh=self.sim_thresh, ave=self.ave)
+
+        
         fc_output = self.linear_pred(trans_cls)
         fc_output = torch.reshape(fc_output, [outputs_decode.shape[0], -1, self.num_classes + 1])[:, :, :-1]
-
+        # ********************************************************** # 
         if self.training:
 
             return self.get_losses(
@@ -305,7 +324,8 @@ class YOLOXHead(nn.Module):
             )
         else:
 
-            class_conf, class_pred = torch.max(fc_output, -1, keepdim=False)  #
+            # class_conf, class_pred = torch.max(fc_output, -1, keepdim=False)  
+            # 
             result, result_ori = postprocess(copy.deepcopy(pred_result), self.num_classes, fc_output,nms_thre=nms_thresh )
 
             return result, result_ori  # result
@@ -355,8 +375,8 @@ class YOLOXHead(nn.Module):
         for i, feature in enumerate(features):
             features_cls.append(feature[idxs[i][:self.simN]])
             features_reg.append(reg_features[i, idxs[i][:self.simN]])
-            cls_scores.append(predictions[i][:self.simN, 5])
-            fg_scores.append(predictions[i][:self.simN, 4])
+            cls_scores.append(predictions[i][:self.simN, 5])        # class conf
+            fg_scores.append(predictions[i][:self.simN, 4])         # object conf
         features_cls = torch.cat(features_cls)
         features_reg = torch.cat(features_reg)
         cls_scores = torch.cat(cls_scores)
@@ -823,20 +843,21 @@ class YOLOXHead(nn.Module):
         prediction[:, :, :4] = box_corner[:, :, :4]
         output = [None for _ in range(len(prediction))]
         output_index = [None for _ in range(len(prediction))]
+
         features_list = []
-        for i, image_pred in enumerate(prediction):
+        for i, image_pred in enumerate(prediction):     # for batch
 
             if not image_pred.size(0):
                 continue
             # Get score and class with highest confidence
-            class_conf, class_pred = torch.max(image_pred[:, 5: 5 + num_classes], 1, keepdim=True)
+            class_conf, class_pred = torch.max(image_pred[:, 5: 5 + num_classes], 1, keepdim=True)      # 8400个anchor分类置信度最大值
 
             # Detections ordered as (x1, y1, x2, y2, obj_conf, class_conf, class_pred)
             detections = torch.cat(
                 (image_pred[:, :5], class_conf, class_pred.float(), image_pred[:, 5: 5 + num_classes]), 1)
 
-            conf_score = image_pred[:, 4]
-            top_pre = torch.topk(conf_score, k=self.Prenum)
+            conf_score = image_pred[:, 4]           # obj conf
+            top_pre = torch.topk(conf_score, k=self.Prenum)     # 750
             sort_idx = top_pre.indices[:self.Prenum]
             detections_temp = detections[sort_idx, :]
             nms_out_index = torchvision.ops.batched_nms(
@@ -846,7 +867,7 @@ class YOLOXHead(nn.Module):
                 nms_thre,
             )
 
-            topk_idx = sort_idx[nms_out_index[:self.topK]]
+            topk_idx = sort_idx[nms_out_index[:self.topK]]      # topK
             output[i] = detections[topk_idx, :]
             output_index[i] = topk_idx
 

@@ -1,3 +1,9 @@
 
 yolox/data/datasets/train_seq.npy
 *.json
+build/
+*.pyc
+yolox.egg-info/
+*.mp4
+*.pth
+YOLOX_outputs/

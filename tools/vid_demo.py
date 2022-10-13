@@ -26,7 +26,7 @@ def make_parser():
     # parser.add_argument(
     #     "demo", default="video", help="demo type, eg. image, video and webcam"
     # )
-    parser.add_argument("-expn", "--experiment-name", type=str, default=None)
+    parser.add_argument("-expn", "--experiment-name", type=str, default=None)           
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
 
     parser.add_argument(
@@ -41,7 +41,7 @@ def make_parser():
         "--exp_file",
         default='',
         type=str,
-        help="pls input your expriment description file",
+        help="pls input your expriment description file",               # py file path
     )
     parser.add_argument("-c", "--ckpt", default='', type=str, help="ckpt for eval")
     parser.add_argument(
@@ -56,9 +56,9 @@ def make_parser():
         type = str,
         help = "Decide pred classes"
     )
-    parser.add_argument("--conf", default=0.05, type=float, help="test conf")
-    parser.add_argument("--nms", default=0.5, type=float, help="test nms threshold")
-    parser.add_argument("--tsize", default=576, type=int, help="test img size")
+    parser.add_argument("--conf", default=0.5, type=float, help="test conf")
+    parser.add_argument("--nms", default=0.65, type=float, help="test nms threshold")
+    parser.add_argument("--tsize", default=672, type=int, help="test img size")
     parser.add_argument(
         "--fp16",
         dest="fp16",
@@ -90,6 +90,7 @@ def make_parser():
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
     parser.add_argument('--gframe', default=32, help='global frame num')
+    
     parser.add_argument('--save_result', default=True)
     return parser
 
@@ -176,7 +177,7 @@ def image_demo(predictor, vis_folder, path, current_time, save_result):
             break
 
 def imageflow_demo(predictor, vis_folder, current_time, args):
-    gframe = args.gframe
+    gframe = args.gframe            # global frame num
     cap = cv2.VideoCapture(args.path)
     width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)  # float
     height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)  # float
@@ -186,43 +187,50 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
     )
 
     os.makedirs(save_folder, exist_ok=True)
+    # scaler for resize
     ratio = min(predictor.test_size[0] / height, predictor.test_size[1] / width)
     save_path = os.path.join(save_folder, args.path.split("/")[-1])
     logger.info(f"video save_path is {save_path}")
     vid_writer = cv2.VideoWriter(
         save_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (int(width), int(height))
     )
-    frames = []
+    frames = []             # whole data for video
     outputs = []
     ori_frames = []
     while True:
         ret_val, frame = cap.read()
         if ret_val:
             ori_frames.append(frame)
+            # preprocess image
             frame, _ = predictor.preproc(frame, None, exp.test_size)
             frames.append(torch.tensor(frame))
         else:
             break
     res = []
-    frame_len = len(frames)
+    frame_len = len(frames)             # video data frame num
     index_list = list(range(frame_len))
+    # shuffle 图像数据内容
     random.seed(41)
     random.shuffle(index_list)
     random.seed(41)
     random.shuffle(frames)
 
-    split_num = int(frame_len / (gframe))#
+    split_num = int(frame_len / (gframe))   # one split num
 
     for i in range(split_num):
-        res.append(frames[i * gframe:(i + 1) * gframe])
+        res.append(frames[i * gframe:(i + 1) * gframe])     # 顺序处理
     res.append(frames[(i + 1) * gframe:])
 
     for ele in res:
         if ele == []: continue
         ele = torch.stack(ele)
         t0 = time.time()
+        # inference 32 batch data 
         outputs.extend(predictor.inference(ele))
+
+    # 排序
     outputs = [j for _,j in sorted(zip(index_list,outputs))]
+    # 原始图像数据与输出结果对应
     for output,img in zip(outputs,ori_frames[:len(outputs)]):
 
         result_frame = predictor.visual(output,img,ratio,cls_conf=args.conf)
@@ -232,7 +240,7 @@ def imageflow_demo(predictor, vis_folder, current_time, args):
 def main(exp, args):
     if not args.experiment_name:
         args.experiment_name = exp.exp_name
-
+    # ./YOLOX_outputs/yolov_s
     file_name = os.path.join(exp.output_dir, args.experiment_name)
     os.makedirs(file_name, exist_ok=True)
 
@@ -292,7 +300,7 @@ def main(exp, args):
     else:
         predictor = Predictor(model, exp, COCO_CLASSES, trt_file, decoder, args.device, args.legacy)
     current_time = time.localtime()
-
+    # video inference
     imageflow_demo(predictor, vis_folder, current_time, args)
 
 
